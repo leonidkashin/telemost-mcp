@@ -4,6 +4,7 @@ Two channels share one Yandex session. The user pastes its Cookie header into th
 - HTTP `POST messenger.360.yandex.ru/api/` takes the form field `request={"method", "params"}`.
 - The Xiva WebSocket at push.yandex.ru carries `whoami`, `history` and other fanout calls.
   A frame is msgpack `1, [service_index, req_id, method]`, a 12-byte header, then JSON.
+- Attachments come from `GET <files host>/file_shortterm/<FileInfo.Id2>`, which redirects to a signed storage URL.
 The protocol is reverse-engineered from web client 211.3.0. Yandex can change it without notice.
 """
 
@@ -38,6 +39,13 @@ API_HEADERS = {
     "Referer": ORIGIN + "/",
     "User-Agent": USER_AGENT,
 }
+# The business host is tried first, then the consumer one. TELEMOST_FILES_HOST pins a single host.
+FILE_HOSTS = (
+    [os.environ["TELEMOST_FILES_HOST"]] if os.environ.get("TELEMOST_FILES_HOST")
+    else ["files.messenger.360.yandex.ru", "files.messenger.yandex.ru"]
+)
+# FileInfo.Id2 is `<bucket>/<uuid>`. It goes into the URL path unescaped, so only plain segments pass.
+FILE_ID = re.compile(r"[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*")
 # The web client writes 5 into byte 0 of this header and leaves the rest empty.
 PAYLOAD_HEADER = b"\x05" + bytes(11)
 DATA, PROXY_STATUS = 1, 2
@@ -153,6 +161,36 @@ class Telemost:
         if body.get("status") != "ok":
             raise TelemostError(f"{method} failed: {body}")
         return body["data"]
+
+    async def download(self, file_id: str, dest: Path) -> str:
+        """Write the attachment to `dest` and return its Content-Type."""
+        if not FILE_ID.fullmatch(file_id) or ".." in file_id.split("/"):
+            raise TelemostError(f"Not an attachment id: {file_id!r}. Pass `id` from a message's `files`.")
+        headers = {"Cookie": cookie_header(), "Origin": ORIGIN, "Referer": ORIGIN + "/", "User-Agent": USER_AGENT}
+        errors = []
+        for host in FILE_HOSTS:
+            try:
+                response = await self.http.get(f"https://{host}/file_shortterm/{file_id}", params={"attach": "true"}, headers=headers)
+            except httpx.HTTPError as error:
+                errors.append(f"{host}: {type(error).__name__}")
+                continue
+            if response.is_redirect:
+                # The storage URL is signed. The session cookie must not follow it there.
+                url, headers = response.headers["Location"], {"User-Agent": USER_AGENT}
+            elif response.is_success:
+                dest.write_bytes(response.content)
+                return response.headers.get("Content-Type", "")
+            else:
+                errors.append(f"{host}: HTTP {response.status_code}")
+                continue
+            async with httpx.AsyncClient(timeout=300, follow_redirects=True) as storage:
+                async with storage.stream("GET", url, headers=headers) as stored:
+                    stored.raise_for_status()
+                    with dest.open("wb") as out:
+                        async for chunk in stored.aiter_bytes():
+                            out.write(chunk)
+                    return stored.headers.get("Content-Type", "")
+        raise TelemostError(f"Could not download {file_id}: {'; '.join(errors)}")
 
     async def fanout(self, method: str, body: dict) -> dict:
         async with self.lock:

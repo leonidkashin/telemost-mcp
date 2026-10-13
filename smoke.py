@@ -37,6 +37,9 @@ async def main(chat_query: str) -> None:
         starter = next((m for m in page if "thread" in m), None)
         if starter:
             await step("thread_get", server.thread_get, starter["thread"]["id"], limit=3)
+        attached = next((f for m in page for f in m.get("files", []) if "id" in f), None)
+        if attached:
+            await step("attachment_get", server.attachment_get, attached["id"], attached.get("name"), frames=1)
         guids = sorted({m["author_guid"] for m in page if "author_guid" in m})
         await step("users_get", server.users_get, guids)
         word = next((w for m in page for w in m.get("text", "").split() if len(w) > 4), "привет")

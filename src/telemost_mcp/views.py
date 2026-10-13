@@ -24,10 +24,22 @@ def thread_id(chat_id: str, ts_mcs: int) -> str:
     return f"{f'1{int(head):02d}/{rest}' if sep else f'110/0/{chat_id}'}_{ts_mcs}"
 
 
+ATTACHMENT_KINDS = {"Image": "image", "MiscFile": "file", "Voice": "voice"}
+
+
+def attachments(plain: dict) -> list[dict]:
+    """Attachments of a message body. `id` is `FileInfo.Id2`, the `<bucket>/<uuid>` that attachment_get takes."""
+    holders = [(kind, plain[key]) for key, kind in ATTACHMENT_KINDS.items() if key in plain]
+    holders += [("image", item["Image"]) for item in plain.get("Gallery", {}).get("Items", []) if "Image" in item]
+    return [
+        compact({"id": info.get("Id2") or info.get("Id"), "name": info.get("Name"), "kind": kind, "size": info.get("Size")})
+        for kind, holder in holders
+        if (info := holder.get("FileInfo") or {})
+    ]
+
+
 def file_names(plain: dict) -> list[str]:
-    single = [plain[kind]["FileInfo"]["Name"] for kind in ("MiscFile", "Image") if kind in plain]
-    gallery = [item["Image"]["FileInfo"]["Name"] for item in plain.get("Gallery", {}).get("Items", []) if "Image" in item]
-    return single + gallery
+    return [a["name"] for a in attachments(plain) if "name" in a]
 
 
 def system_text(system: dict) -> str | None:
@@ -56,7 +68,7 @@ def message_view(server_message: dict) -> dict:
         "author": author.get("DisplayName"),
         "author_guid": author.get("Guid"),
         "text": plain.get("Text", {}).get("MessageText") or plain.get("Gallery", {}).get("Text"),
-        "files": file_names(plain),
+        "files": attachments(plain) + [a for f in server_message.get("ForwardedMessages", []) for a in attachments(f["Payload"])],
         "quotes": [s["Quote"] for s in plain.get("ForwardedMessageStyles", []) if s.get("Quote")],
         "forwarded": [
             f"{f['ServerMessageInfo']['From'].get('DisplayName')}: "

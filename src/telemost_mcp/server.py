@@ -3,16 +3,24 @@
 Live tools call Telemost directly. `sync` copies history into an in-memory store, and
 `local_search` runs prefix search over that copy across all synced chats. Set TELEMOST_DB to keep
 the copy in a file between sessions, pruned to TELEMOST_RETENTION_DAYS (14 by default).
+`attachment_get` writes to disk only what it cannot show inline, or what it is asked to save,
+into TELEMOST_DOWNLOADS (~/Downloads/telemost by default).
 """
 
 import asyncio
+import json
+import mimetypes
 import os
+import shutil
+import tempfile
 import time
 from pathlib import Path
 
-from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import Image, MCPServer
+from mcp.types import TextContent
 
 from telemost_mcp.client import Telemost
+from telemost_mcp.media import picture, video_frames
 from telemost_mcp.store import Store
 from telemost_mcp.views import chat_view, iso, message_view, thread_id, to_mcs, user_view
 
@@ -22,6 +30,7 @@ mcp = MCPServer(
         "Read-only access to the user's Yandex Telemost work chats. "
         "Find a chat_id with chats_list, then read it with messages_get or search it with messages_search. "
         "Messages that start a thread carry `thread` and inline `replies`; page long threads with thread_get. "
+        "Open an attachment by passing its `id` from a message's `files` to attachment_get. "
         "Timestamps are ISO 8601 in local time."
     ),
 )
@@ -32,6 +41,7 @@ store = Store(
     retention_days=int(os.environ.get("TELEMOST_RETENTION_DAYS", "14")),
 )
 PAGE = 50
+DOWNLOADS = Path(os.environ.get("TELEMOST_DOWNLOADS", "~/Downloads/telemost")).expanduser()
 
 
 async def all_chats() -> list[dict]:
@@ -194,6 +204,53 @@ async def local_search(query: str, chat_id: str | None = None, limit: int = 50) 
     Run `sync` first. Prefer it to `messages_search` for "every mention in the last N days" questions.
     """
     return store.search(query, chat_id, limit)
+
+
+def save_copy(source: Path, name: str) -> Path:
+    """Copy into DOWNLOADS without overwriting: a taken name gets ` (2)`, ` (3)`, ..."""
+    DOWNLOADS.mkdir(parents=True, exist_ok=True)
+    name = Path(name).name or "attachment"
+    dest, n = DOWNLOADS / name, 1
+    while dest.exists():
+        n += 1
+        dest = DOWNLOADS / f"{Path(name).stem} ({n}){Path(name).suffix}"
+    shutil.copyfile(source, dest)
+    return dest
+
+
+@mcp.tool()
+async def attachment_get(
+    file_id: str, name: str | None = None, save: bool = False, frames: int = 6
+) -> list[TextContent | Image]:
+    """Open an attachment: `file_id` is `id` and `name` is `name` from an entry of a message's `files`.
+
+    Images come back inline, downscaled to 1568px. Videos come back as `frames` stills spread over
+    their length (needs ffmpeg). Other files, or any file with `save`, are written to the downloads
+    folder and the result gives the path, so a PDF or document can then be read from disk.
+    """
+    name = name or file_id.rsplit("/", 1)[-1]
+    with tempfile.TemporaryDirectory() as tmp:
+        raw = Path(tmp) / "attachment"
+        content_type = (await client.download(file_id, raw)).split(";")[0].strip()
+        if content_type in ("", "application/octet-stream"):
+            content_type = mimetypes.guess_type(name)[0] or content_type
+        info = {"name": name, "type": content_type, "size": raw.stat().st_size}
+        blocks: list[TextContent | Image] = []
+        if not content_type.startswith(("video/", "audio/")) and (image := picture(raw)):
+            blocks.append(Image(data=image[0], format=image[1]))
+        elif content_type.startswith("video/"):
+            stills = await video_frames(raw, max(1, min(frames, 20)))
+            if stills is None:
+                info["note"] = "ffmpeg is not installed, so no stills; the video is saved instead."
+                save = True
+            else:
+                info["frames"] = len(stills)
+                blocks += [Image(data=still, format="jpeg") for still in stills]
+        else:
+            save = True
+        if save:
+            info["saved_to"] = str(save_copy(raw, name))
+    return [TextContent(type="text", text=json.dumps(info, ensure_ascii=False)), *blocks]
 
 
 def main() -> None:

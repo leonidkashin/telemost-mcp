@@ -54,7 +54,7 @@ class Store:
         rows = [
             (
                 m["chat_id"], m["ts_mcs"], chat_name, m.get("author"),
-                "\n".join([m.get("text", ""), *m.get("files", []), *m.get("quotes", []), *m.get("forwarded", [])]),
+                "\n".join([m.get("text", ""), *(f.get("name", "") for f in m.get("files", [])), *m.get("quotes", []), *m.get("forwarded", [])]),
                 json.dumps(m, ensure_ascii=False),
             )
             for m in messages if "chat_id" in m
