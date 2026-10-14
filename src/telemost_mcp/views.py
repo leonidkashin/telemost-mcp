@@ -30,6 +30,19 @@ def file_names(plain: dict) -> list[str]:
     return single + gallery
 
 
+def plain_text(plain: dict) -> str | None:
+    """A caption under images lives in `Gallery.Text`, not in `Text`."""
+    return plain.get("Text", {}).get("MessageText") or plain.get("Gallery", {}).get("Text")
+
+
+def forwarded_text(forwarded: dict) -> str:
+    """`Author: text [files]`; the caption of a forwarded screenshot is often the whole report."""
+    payload = forwarded["Payload"]
+    text, files = plain_text(payload), ", ".join(file_names(payload))
+    body = f"{text} [{files}]" if text and files else text or files or "(attachment)"
+    return f"{forwarded['ServerMessageInfo']['From'].get('DisplayName')}: {body}"
+
+
 def system_text(system: dict) -> str | None:
     if not system:
         return None
@@ -55,14 +68,10 @@ def message_view(server_message: dict) -> dict:
         "ts_mcs": info["Timestamp"],
         "author": author.get("DisplayName"),
         "author_guid": author.get("Guid"),
-        "text": plain.get("Text", {}).get("MessageText") or plain.get("Gallery", {}).get("Text"),
+        "text": plain_text(plain),
         "files": file_names(plain),
         "quotes": [s["Quote"] for s in plain.get("ForwardedMessageStyles", []) if s.get("Quote")],
-        "forwarded": [
-            f"{f['ServerMessageInfo']['From'].get('DisplayName')}: "
-            + (f["Payload"].get("Text", {}).get("MessageText") or ", ".join(file_names(f["Payload"])) or "(attachment)")
-            for f in server_message.get("ForwardedMessages", [])
-        ],
+        "forwarded": [forwarded_text(f) for f in server_message.get("ForwardedMessages", [])],
         "system": system_text(client.get("SystemMessage")),
         "thread": {
             "id": thread_id(chat_id, info["Timestamp"]),
